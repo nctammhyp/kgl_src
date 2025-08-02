@@ -19,7 +19,7 @@ def load_image(rgb_path):
 
 def load_pretrained_fastdepth(model, weights_path):
     checkpoint = torch.load(weights_path, map_location="cpu")
-    model.load_state_dict(checkpoint["model"])
+    model.load_state_dict(checkpoint)
     return model
 
 def inference(image_path, model_path, use_cuda=True):
