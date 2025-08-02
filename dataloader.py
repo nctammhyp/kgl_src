@@ -80,8 +80,8 @@ class DepthDataset(Dataset):
         self.transform = Compose([
             Resize(
                 width=net_w, height=net_h,
-                # resize_target=True,
-                resize_target=True if mode == 'train' else False,
+                resize_target=True,
+                # resize_target=True if mode == 'train' else False,
                 keep_aspect_ratio=True,
                 ensure_multiple_of=14, resize_method="lower_bound",
                 image_interpolation_method=cv2.INTER_CUBIC,
