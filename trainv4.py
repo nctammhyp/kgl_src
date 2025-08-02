@@ -92,7 +92,7 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
         model.train()
         total_loss = 0
 
-        for i , (input,target) in tqdm(train_loader):
+        for i , (input,target) in tqdm(enumerate(train_loader)):
             img, depth = input.to(device), target.to(device)
 
             optim.zero_grad()
@@ -111,7 +111,7 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
         test_loss = 0
 
         with torch.no_grad():
-            for i , (input,target) in tqdm(val_loader):
+            for i , (input,target) in tqdm(enumerate(val_loader)):
                 img, depth = input.to(device), target.to(device)
 
                 pred = model(img)
