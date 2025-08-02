@@ -62,7 +62,7 @@ def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_st
 
 def train_fn(device = "cpu", load_state = False, state_path = './'):
     # params
-    num_epochs = 300
+    num_epochs = 375
 
 
     model = FastDepthV2().to("cuda:0")
@@ -81,11 +81,11 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
     train_loader, val_loader = dataloader_v4.create_data_loaders("/kaggle/input/danything-dataset/danything/danything", batch_size=64, size=(224, 224))
  
 
-    best_val_loss = 60.70265
+    best_val_loss = 18.78022
     history = {"train_loss": [], "val_loss": [], "val_metrics": []}
 
     if load_state:
-        checkpoint = torch.load("/kaggle/working/ours_checkpoints/checkpoint_best_99.pth", map_location=device)
+        checkpoint = torch.load("/kaggle/working/ours_checkpoints/checkpoint_best_298.pth", map_location=device)
         # model.load_state_dict(checkpoint["model"])
         # optim.load_state_dict(checkpoint["optim"])
 
@@ -93,7 +93,7 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
         model = model.to("cuda")
 
 
-    for epoch in range(100, num_epochs):
+    for epoch in range(300, num_epochs):
         model.train()
         total_loss = 0
 
