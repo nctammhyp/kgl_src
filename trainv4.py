@@ -24,6 +24,7 @@ from tqdm import tqdm
 import torch.nn.functional as F
 import json
 
+import glob
 
 
 args = utils.parse_args()
@@ -136,15 +137,23 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
 
 
         # ===== Save Checkpoint =====
-        torch.save({
-            "model": model.state_dict(),
-            "optim": optim.state_dict()
-            # "scheduler": scheduler.state_dict()
-        }, f"{state_path}/checkpoint_{epoch}.pth")
+        # torch.save({
+        #     "model": model.state_dict(),
+        #     "optim": optim.state_dict()
+        #     # "scheduler": scheduler.state_dict()
+        # }, f"{state_path}/checkpoint_{epoch}.pth")
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), f"{state_path}/checkpoint_best_{epoch}.pth")
+            new_ckpt = f"{state_path}/checkpoint_best_{epoch}.pth"
+
+            # 1. Lưu checkpoint mới
+            torch.save(model.state_dict(), new_ckpt)
+
+            # 2. Xóa tất cả checkpoint cũ (trừ file vừa lưu)
+            for ckpt in glob.glob(f"{state_path}/checkpoint_best_*.pth"):
+                if ckpt != new_ckpt:
+                    os.remove(ckpt)
 
         # Cập nhật history
         history["train_loss"].append(avg_loss)
