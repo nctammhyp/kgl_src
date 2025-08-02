@@ -18,9 +18,10 @@ def load_image(rgb_path):
     return load_test_image(rgb), rgb
 
 def load_pretrained_fastdepth(model, weights_path):
-    checkpoint = torch.load(weights_path, map_location="cpu")
-    model.load_state_dict(checkpoint)
+    state_dict = torch.load(weights_path, map_location="cpu")
+    model.load_state_dict(state_dict)  # Vì bạn đã lưu trực tiếp state_dict
     return model
+
 
 def inference(image_path, model_path, use_cuda=True):
     model = FastDepthV2()
