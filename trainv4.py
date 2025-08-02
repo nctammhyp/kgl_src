@@ -62,7 +62,7 @@ def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_st
 
 def train_fn(device = "cpu", load_state = False, state_path = './'):
     # params
-    num_epochs = 100
+    num_epochs = 300
 
 
     model = FastDepthV2().to("cuda:0")
@@ -81,15 +81,19 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
     train_loader, val_loader = dataloader_v4.create_data_loaders("/kaggle/input/danything-dataset/danything/danything", batch_size=64, size=(224, 224))
  
 
-    best_val_loss = 1e9
+    best_val_loss = 60.70265
     history = {"train_loss": [], "val_loss": [], "val_metrics": []}
 
     if load_state:
-        checkpoint = torch.load("/content/drive/MyDrive/depth_training/FastDepth/ours_checkpoints/checkpoint_40.pth", map_location=device)
-        model.load_state_dict(checkpoint["model"])
-        optim.load_state_dict(checkpoint["optim"])
+        checkpoint = torch.load("/kaggle/working/ours_checkpoints/checkpoint_best_99.pth", map_location=device)
+        # model.load_state_dict(checkpoint["model"])
+        # optim.load_state_dict(checkpoint["optim"])
 
-    for epoch in range(0, num_epochs):
+        model.load_state_dict(checkpoint)
+        model = model.to("cuda")
+
+
+    for epoch in range(100, num_epochs):
         model.train()
         total_loss = 0
 
@@ -190,4 +194,4 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
 
 
 if __name__ == "__main__":
-    train_fn(device='cuda:0', load_state=False, state_path="/kaggle/working/ours_checkpoints")
+    train_fn(device='cuda:0', load_state=True, state_path="/kaggle/working/ours_checkpoints")
