@@ -62,14 +62,14 @@ def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_st
 
 def train_fn(device = "cpu", load_state = False, state_path = './'):
     # params
-    num_epochs = 375
+    num_epochs = 405
 
 
     model = FastDepthV2().to("cuda:0")
     model.encoder = load_pretrained_encoder(model.encoder,args.weights_dir,args.backbone)
     model.decoder.apply(weights_init)
 
-    optim = torch.optim.SGD(model.parameters(), lr = 0.01 ,weight_decay=1e-4)
+    optim = torch.optim.SGD(model.parameters(), lr = 3e-4 ,weight_decay=1e-4)
 
     print('Model created')
 
@@ -85,7 +85,7 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
     history = {"train_loss": [], "val_loss": [], "val_metrics": []}
 
     if load_state:
-        checkpoint = torch.load("/kaggle/working/ours_checkpoints/checkpoint_best_298.pth", map_location=device)
+        checkpoint = torch.load("/kaggle/working/ours_checkpoints/checkpoint_best_358.pth", map_location=device)
         # model.load_state_dict(checkpoint["model"])
         # optim.load_state_dict(checkpoint["optim"])
 
@@ -93,7 +93,7 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
         model = model.to("cuda")
 
 
-    for epoch in range(300, num_epochs):
+    for epoch in range(360, num_epochs):
         model.train()
         total_loss = 0
 
