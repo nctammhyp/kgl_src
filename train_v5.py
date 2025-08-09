@@ -10,7 +10,7 @@ import albumentations as A
 import matplotlib.pyplot as plt
 
 from model_v4 import FastDepthV2, FastDepth, weights_init
-import dataloader_v4
+import dataloader_v5
 from load_pretrained import load_pretrained_encoder, load_pretrained_fastdepth
 import torch.optim as optim
 
@@ -78,10 +78,10 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
 
     # scheduler = transformers.get_cosine_schedule_with_warmup(optim, len(train_dataloader)*warmup_epochs, num_epochs*scheduler_rate*len(train_dataloader))
 
-    train_loader, val_loader = dataloader_v4.create_data_loaders("/kaggle/input/danything-dataset/danything/danything", batch_size=64, size=(224, 224))
+    train_loader, val_loader = dataloader_v5.create_data_loaders("/kaggle/input/danything-dataset/danything/danything", batch_size=64, size=(224, 224))
  
 
-    best_val_loss = 18.78022
+    best_val_loss = 1e9
     history = {"train_loss": [], "val_loss": [], "val_metrics": []}
 
     if load_state:
@@ -194,4 +194,4 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
 
 
 if __name__ == "__main__":
-    train_fn(device='cuda:0', load_state=True, state_path="/kaggle/working/ours_checkpoints")
+    train_fn(device='cuda:0', load_state=False, state_path="/kaggle/working/ours_checkpoints")
