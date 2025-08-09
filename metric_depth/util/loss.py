@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 import numpy as np
+import torch.nn.functional as F
 
 
 class SiLogLoss(nn.Module):
@@ -91,4 +92,92 @@ class DepthLoss(nn.Module):
         conv2.weight = nn.Parameter(weight)
         grad_y = conv2(img)
         return grad_y, grad_x
-    
+
+
+class ScaleInvariantGradientMatchingLoss(nn.Module):
+    def __init__(self, scales=(1,2,4), loss_type='l1', eps=1e-6):
+        super().__init__()
+        self.scales = scales
+        self.loss_type = loss_type
+        self.eps = eps
+
+        kernel_x = torch.tensor([[[[-1, 1]]]], dtype=torch.float32)
+        kernel_y = torch.tensor([[[[-1], [1]]]], dtype=torch.float32)
+        self.register_buffer('kernel_x', kernel_x)
+        self.register_buffer('kernel_y', kernel_y)
+
+    def _downsample(self, x, factor):
+        if factor == 1:
+            return x
+        h = x.shape[-2] // factor
+        w = x.shape[-1] // factor
+        return F.interpolate(x, size=(h, w), mode='bilinear', align_corners=False)
+
+    def _gradient_xy(self, x):
+        pad_x = (1, 0, 0, 0)
+        pad_y = (0, 0, 1, 0)
+        gx = F.conv2d(F.pad(x, pad_x, mode='replicate'),
+                      self.kernel_x.repeat(x.shape[1], 1, 1, 1),
+                      groups=x.shape[1])
+        gy = F.conv2d(F.pad(x, pad_y, mode='replicate'),
+                      self.kernel_y.repeat(x.shape[1], 1, 1, 1),
+                      groups=x.shape[1])
+        return gx, gy
+
+    def forward(self, pred, target, valid_mask):
+        if pred.dim() == 3:
+            pred = pred.unsqueeze(1)
+        if target.dim() == 3:
+            target = target.unsqueeze(1)
+        if valid_mask is None:
+            valid_mask = torch.ones_like(pred, dtype=torch.bool, device=pred.device)
+        else:
+            if valid_mask.dim() == 3:
+                valid_mask = valid_mask.unsqueeze(1)
+            valid_mask = valid_mask.to(torch.bool)
+
+        pred = pred.clamp(min=self.eps)
+        target = target.clamp(min=self.eps)
+
+        log_pred_full = torch.log(pred)
+        log_target_full = torch.log(target)
+
+        total_loss = 0.0
+        for factor in self.scales:
+            lp = self._downsample(log_pred_full, factor)
+            lt = self._downsample(log_target_full, factor)
+            vm = self._downsample(valid_mask.float(), factor) >= 0.5
+
+            gx_p, gy_p = self._gradient_xy(lp)
+            gx_t, gy_t = self._gradient_xy(lt)
+
+            diff_x = gx_p - gx_t
+            diff_y = gy_p - gy_t
+
+            if self.loss_type == 'l1':
+                per_px = torch.abs(diff_x) + torch.abs(diff_y)
+            else:
+                per_px = diff_x ** 2 + diff_y ** 2
+
+            mask = vm.expand_as(per_px)
+            valid_count = mask.float().sum()
+            if valid_count.item() > 0:
+                loss_scale = (per_px * mask.float()).sum() / (valid_count + self.eps)
+                total_loss += loss_scale
+
+        return total_loss / len(self.scales)
+
+
+class CombinedDepthLoss(nn.Module):
+    def __init__(self, alpha=1.0, beta=1.0, lambd_silog=0.5):
+        super().__init__()
+        self.silog = SiLogLoss(lambd=lambd_silog)
+        self.grad_loss = ScaleInvariantGradientMatchingLoss(scales=(1, 2, 4))
+        self.alpha = alpha
+        self.beta = beta
+
+    def forward(self, pred, target, valid_mask):
+        loss_silog = self.silog(pred, target, valid_mask)
+        loss_grad = self.grad_loss(pred, target, valid_mask)
+        total = self.alpha * loss_silog + self.beta * loss_grad
+        return total, loss_silog, loss_grad

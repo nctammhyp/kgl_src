@@ -32,21 +32,33 @@ args = utils.parse_args()
 
 
 def eval_depth(pred, target):
-    valid_mask = ((target>0) + (pred>0)) > 0
-    pred_output = pred[valid_mask]
-    target_masked =  target[valid_mask]
-    abs_diff = (pred_output - target_masked).abs() 
-    RMSE = torch.sqrt(torch.mean((abs_diff).pow(2)))
+    eps = 1e-6  # tránh chia 0, log 0
+    assert pred.shape == target.shape
 
-    maxRatio = torch.max(pred_output / target_masked, target_masked / pred_output)
-    d1 = float((maxRatio < 1.25).float().mean())
+    pred_safe = torch.clamp(pred, min=eps)
+    target_safe = torch.clamp(target, min=eps)
+
+    thresh = torch.max(target_safe / pred_safe, pred_safe / target_safe)
+    d1 = torch.sum(thresh < 1.25).float() / len(thresh)
+
+    diff = pred_safe - target_safe
+    diff_log = torch.log(pred_safe) - torch.log(target_safe)
+
+    abs_rel = torch.mean(torch.abs(diff) / target_safe)
+    rmse = torch.sqrt(torch.mean(diff ** 2))
+    mae = torch.mean(torch.abs(diff))
+
+    silog = torch.sqrt(
+        torch.mean(diff_log ** 2) - 0.5 * (torch.mean(diff_log) ** 2)
+    )
 
     return {
-        'd1': d1,
-        'rmse': RMSE.item(),
+        'd1': d1.detach(),
+        'abs_rel': abs_rel.detach(),
+        'rmse': rmse.detach(),
+        'mae': mae.detach(),
+        'silog': silog.detach()
     }
-
-
 
 
 def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps, num_cycles=0.5, last_epoch=-1):
@@ -69,19 +81,23 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
     model.encoder = load_pretrained_encoder(model.encoder,args.weights_dir,args.backbone)
     model.decoder.apply(weights_init)
 
-    optim = torch.optim.SGD(model.parameters(), lr = 3e-4 ,weight_decay=1e-4)
+    optim = torch.optim.AdamW(
+          model.parameters(),  # lấy toàn bộ parameter của model
+          lr=1e-3,
+          weight_decay=0.01
+      )
 
     print('Model created')
 
-    # criterion = SiLogLoss() # author's loss
-    criterion = DepthLoss()
+    criterion = SiLogLoss() # author's loss
+    # criterion = DepthLoss()
 
     # scheduler = transformers.get_cosine_schedule_with_warmup(optim, len(train_dataloader)*warmup_epochs, num_epochs*scheduler_rate*len(train_dataloader))
 
-    train_loader, val_loader = dataloader_v5.create_data_loaders("/kaggle/input/hypdataset-v1-0/hypdataset_v1")
+    train_loader, val_loader = dataloader_v5.create_data_loaders("/kaggle/input/danything-dataset/danything/danything", batch_size=64, size=(224, 224))
  
 
-    best_val_loss = 1e9
+    best_val_absrel = 1e9
     history = {"train_loss": [], "val_loss": [], "val_metrics": []}
 
     if load_state:
@@ -101,8 +117,15 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
             img, depth = input.to(device), target.to(device)
 
             optim.zero_grad()
-            pred = model(img)
-            loss = criterion('l1',pred,depth,epoch)
+            pred = model(img).squeeze(1)  
+
+            # loss = criterion('l1',pred,depth,epoch)
+
+            mask = (depth > 1e-3) & (depth <= 255) & torch.isfinite(depth)
+            loss = criterion(pred, depth, mask)
+
+
+
             loss.backward()
             optim.step()
 
@@ -112,8 +135,9 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
 
         # ===== Validation =====
         model.eval()
-        results = {'d1': 0, 'rmse': 0}
-        test_loss = 0
+        # results = {'d1': 0, 'rmse': 0}
+        results = {'d1': 0, 'abs_rel': 0, 'rmse': 0, 'mae': 0, 'silog': 0}
+        # test_loss = 0
 
         with torch.no_grad():
             for i , (input,target) in tqdm(enumerate(val_loader)):
@@ -121,22 +145,25 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
 
                 pred = model(img)
 
-                test_loss += criterion('l1',pred, depth).item()
+                # test_loss += criterion('l1',pred, depth).item()
+                pred = pred.squeeze(1).squeeze(0)
 
                 # mask = (depth >= 0.001)
-                cur_results = eval_depth(pred, depth)
+                # cur_results = eval_depth(pred, depth)
+                mask = (depth <= 255) & (depth >= 0.001)
+                cur_results = eval_depth(pred[mask], depth[mask])
 
 
                 for k in results:
                     results[k] += cur_results[k]
 
         
-        val_loss = test_loss/len(val_loader)
+        # val_loss = test_loss/len(val_loader)
 
         # for k in results:
         #    results[k] = round(results[k] / len(val_loader), 3)
         for k in results:
-            results[k] = round((results[k] / len(val_loader)), 3)
+            results[k] = round((results[k] / len(val_loader)).item(), 3)
 
 
 
@@ -147,8 +174,8 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
         #     # "scheduler": scheduler.state_dict()
         # }, f"{state_path}/checkpoint_{epoch}.pth")
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if results['abs_rel'] < best_val_absrel:
+            best_val_absrel = results['abs_rel']
             new_ckpt = f"{state_path}/checkpoint_best_{epoch}.pth"
 
             # 1. Lưu checkpoint mới
@@ -161,7 +188,7 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
 
         # Cập nhật history
         history["train_loss"].append(avg_loss)
-        history["val_loss"].append(val_loss)
+        # history["val_loss"].append(val_loss)
         history["val_metrics"].append(results)
 
         # Lưu log JSON
@@ -169,7 +196,7 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
             json.dump(history, f, indent=2)
 
 
-        print(f"epoch_{epoch}, train_loss={avg_loss:.5f}, val loss: {val_loss:.5f}, val_metrics={results}")
+        print(f"epoch_{epoch}, train_loss={avg_loss:.5f}, val_metrics={results}")
 
         # ==== Vẽ biểu đồ ====
         # epochs = range(1, num_epochs+1)
@@ -183,15 +210,16 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
         plt.savefig(f"{state_path}/train_loss_curve.png")
         plt.close()
 
+        absrel = [m["abs_rel"] for m in history["val_metrics"]]
         plt.figure(figsize=(8,5))
-        plt.plot(epochs, history["val_loss"], label="Val Loss")
+        plt.plot(epochs, absrel, label="AbsRel (val)")
         plt.xlabel("Epoch")
-        plt.ylabel("Loss")
+        plt.ylabel("AbsRel")
         plt.legend()
-        plt.savefig(f"{state_path}/val_loss_curve.png")
+        plt.savefig(f"{state_path}/val_absrel_curve.png")
         plt.close()
 
 
 
 if __name__ == "__main__":
-    train_fn(device='cuda:0', load_state=False, state_path="/kaggle/working/ours_checkpoints")
+    train_fn(device='cuda:0', load_state=True, state_path="/kaggle/working/ours_checkpoints")
