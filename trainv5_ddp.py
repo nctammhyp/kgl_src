@@ -2,6 +2,8 @@ import os
 import glob
 import json
 import torch
+import random
+import numpy as np
 from tqdm import tqdm
 
 import torch.distributed as dist
@@ -22,15 +24,16 @@ def eval_depth(pred, target):
     pred_output = pred[valid_mask]
     target_masked = target[valid_mask]
     abs_diff = (pred_output - target_masked).abs()
-    RMSE = torch.sqrt(torch.mean((abs_diff).pow(2)))
+    RMSE = torch.sqrt(torch.mean(abs_diff.pow(2)))
     maxRatio = torch.max(pred_output / target_masked, target_masked / pred_output)
     d1 = float((maxRatio < 1.25).float().mean())
     return {'d1': d1, 'rmse': RMSE.item()}
 
 
 def setup_ddp(rank, world_size):
-    os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29500'
+    # Bạn có thể đổi IP nếu cần, hoặc giữ localhost nếu chạy local
+    os.environ['MASTER_ADDR'] = 'localhost'  # hoặc IP thật của máy nếu cần
+    os.environ['MASTER_PORT'] = '29500'  # port chưa bị chiếm
     dist.init_process_group(backend='nccl', rank=rank, world_size=world_size)
 
 
@@ -43,26 +46,33 @@ def train_fn(rank, world_size, args):
     setup_ddp(rank, world_size)
     device = torch.device(f"cuda:{rank}")
 
-    # Lấy đường dẫn dữ liệu
+    # Load paths
     train_paths = dataloaderv5_ddp.get_image_label_pairs(os.path.join(args.data_root, "train"))
     val_paths = dataloaderv5_ddp.get_image_label_pairs(os.path.join(args.data_root, "val"))
 
-    # Tạo Dataset
+    # Tạo dataset
     train_dataset = dataloaderv5_ddp.DepthDataset(train_paths, mode="train", size=args.size)
     val_dataset = dataloaderv5_ddp.DepthDataset(val_paths, mode="val", size=args.size)
 
-    # Tạo DistributedSampler dựa trên dataset
+    # Tạo DistributedSampler cho dataset
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
 
-    # Tạo DataLoader với sampler
-    train_loader, val_loader = dataloaderv5_ddp.create_data_loaders(
+    # DataLoader dùng sampler
+    train_loader = torch.utils.data.DataLoader(
         train_dataset,
-        val_dataset,
         batch_size=args.batch_size,
-        train_sampler=train_sampler,
-        val_sampler=val_sampler,
-        num_workers=args.num_workers
+        sampler=train_sampler,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=True
+    )
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset,
+        batch_size=1,
+        sampler=val_sampler,
+        num_workers=args.num_workers,
+        pin_memory=True,
     )
 
     # Model + pretrained encoder + init decoder
@@ -76,7 +86,7 @@ def train_fn(rank, world_size, args):
     optimizer = torch.optim.SGD(model.parameters(), lr=3e-4, weight_decay=1e-4)
     criterion = DepthLoss()
 
-    scaler = torch.amp.GradScaler()
+    scaler = torch.cuda.amp.GradScaler()
 
     best_val_loss = 1e9
     history = {"train_loss": [], "val_loss": [], "val_metrics": []}
@@ -84,7 +94,7 @@ def train_fn(rank, world_size, args):
     if args.load_state:
         ckpt_path = os.path.join(args.state_path, "checkpoint_best.pth")
         ckpt = torch.load(ckpt_path, map_location=device)
-        model.module.load_state_dict(ckpt)
+        model.load_state_dict(ckpt)
 
     for epoch in range(args.num_epochs):
         model.train()
@@ -96,7 +106,7 @@ def train_fn(rank, world_size, args):
             depth = target.to(device, non_blocking=True)
 
             optimizer.zero_grad()
-            with torch.amp.autocast(device_type='cuda'):
+            with torch.cuda.amp.autocast(device_type='cuda'):
                 pred = model(img)
                 loss = criterion('l1', pred, depth, epoch)
 
@@ -121,7 +131,7 @@ def train_fn(rank, world_size, args):
                 img = input.to(device, non_blocking=True)
                 depth = target.to(device, non_blocking=True)
 
-                with torch.amp.autocast(device_type='cuda'):
+                with torch.cuda.amp.autocast(device_type='cuda'):
                     pred = model(img)
                     l = criterion('l1', pred, depth)
 
@@ -144,11 +154,11 @@ def train_fn(rank, world_size, args):
         if rank == 0:
             print(f"Epoch {epoch}: train_loss={avg_loss:.5f}, val_loss={val_loss:.5f}, metrics={results}")
             os.makedirs(args.state_path, exist_ok=True)
+
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 ckpt_path = os.path.join(args.state_path, f"checkpoint_best_{epoch}.pth")
                 torch.save(model.module.state_dict(), ckpt_path)
-
                 # Xóa checkpoint cũ
                 for f in glob.glob(os.path.join(args.state_path, "checkpoint_best_*.pth")):
                     if f != ckpt_path:
