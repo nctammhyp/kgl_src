@@ -87,22 +87,16 @@ def get_image_label_pairs(directory, img_ext=".png", label_ext=".png"):
 
 from torch.utils.data import DistributedSampler
 
-def create_data_loaders(data_root, batch_size=64, size=(160, 128), train_sampler=None, val_sampler=None):
-    train_paths = get_image_label_pairs(os.path.join(data_root, "train"))
-    val_paths = get_image_label_pairs(os.path.join(data_root, "val"))
-
-    train_dataset = DepthDataset(train_paths, mode="train", size=size)
-    val_dataset = DepthDataset(val_paths, mode="val", size=size)
-
+def create_data_loaders(train_dataset, val_dataset, batch_size=64, train_sampler=None, val_sampler=None, num_workers=4):
     train_loader = DataLoader(train_dataset, batch_size=batch_size,
                               sampler=train_sampler,
-                              num_workers=4,
+                              num_workers=num_workers,
                               pin_memory=True,
                               drop_last=True)
 
     val_loader = DataLoader(val_dataset, batch_size=1,
                             sampler=val_sampler,
-                            num_workers=4,
+                            num_workers=num_workers,
                             pin_memory=True)
 
     return train_loader, val_loader
@@ -110,7 +104,17 @@ def create_data_loaders(data_root, batch_size=64, size=(160, 128), train_sampler
 
 if __name__ == "__main__":
     data_root = "/path/to/dataset"
-    train_loader, val_loader = create_data_loaders(data_root, batch_size=8, size=(224, 224))
+    train_paths = get_image_label_pairs(os.path.join(data_root, "train"))
+    val_paths = get_image_label_pairs(os.path.join(data_root, "val"))
+
+    train_dataset = DepthDataset(train_paths, mode="train", size=(224, 224))
+    val_dataset = DepthDataset(val_paths, mode="val", size=(224, 224))
+
+    train_loader, val_loader = create_data_loaders(train_dataset, val_dataset,
+                                                   batch_size=8,
+                                                   train_sampler=None,
+                                                   val_sampler=None,
+                                                   num_workers=4)
 
     for rgb, depth in train_loader:
         print(rgb.shape, depth.shape, rgb.min().item(), rgb.max().item(), depth.min().item(), depth.max().item())

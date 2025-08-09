@@ -1,16 +1,12 @@
 import os
 import glob
 import json
-import math
 import torch
-import random
-import numpy as np
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data.distributed import DistributedSampler
+from torch.utils.data import DistributedSampler
 
 import utils
 from model_v4 import FastDepthV2, weights_init
@@ -22,7 +18,7 @@ torch.backends.cudnn.benchmark = True
 
 
 def eval_depth(pred, target):
-    valid_mask = ((target>0) + (pred>0)) > 0
+    valid_mask = ((target > 0) + (pred > 0)) > 0
     pred_output = pred[valid_mask]
     target_masked = target[valid_mask]
     abs_diff = (pred_output - target_masked).abs()
@@ -33,8 +29,8 @@ def eval_depth(pred, target):
 
 
 def setup_ddp(rank, world_size):
-    os.environ['MASTER_ADDR'] = 'localhost'   # hoặc IP node master
-    os.environ['MASTER_PORT'] = '12355'       # port bất kỳ mở
+    os.environ['MASTER_ADDR'] = '127.0.0.1'
+    os.environ['MASTER_PORT'] = '29500'
     dist.init_process_group(backend='nccl', rank=rank, world_size=world_size)
 
 
@@ -47,23 +43,29 @@ def train_fn(rank, world_size, args):
     setup_ddp(rank, world_size)
     device = torch.device(f"cuda:{rank}")
 
-    # Tạo sampler phân phối dữ liệu cho DDP
+    # Lấy đường dẫn dữ liệu
     train_paths = dataloader_v5.get_image_label_pairs(os.path.join(args.data_root, "train"))
     val_paths = dataloader_v5.get_image_label_pairs(os.path.join(args.data_root, "val"))
 
-    train_sampler = DistributedSampler(train_paths, num_replicas=world_size, rank=rank, shuffle=True)
-    val_sampler = DistributedSampler(val_paths, num_replicas=world_size, rank=rank, shuffle=False)
+    # Tạo Dataset
+    train_dataset = dataloader_v5.DepthDataset(train_paths, mode="train", size=args.size)
+    val_dataset = dataloader_v5.DepthDataset(val_paths, mode="val", size=args.size)
 
-    # Dataloader dùng sampler
+    # Tạo DistributedSampler dựa trên dataset
+    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
+    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+
+    # Tạo DataLoader với sampler
     train_loader, val_loader = dataloader_v5.create_data_loaders(
-        args.data_root,
+        train_dataset,
+        val_dataset,
         batch_size=args.batch_size,
-        size=args.size,
         train_sampler=train_sampler,
-        val_sampler=val_sampler
+        val_sampler=val_sampler,
+        num_workers=args.num_workers
     )
 
-    # Model + encoder pretrained + init decoder
+    # Model + pretrained encoder + init decoder
     model = FastDepthV2()
     model.encoder = load_pretrained_encoder(model.encoder, args.weights_dir, args.backbone)
     model.decoder.apply(weights_init)
@@ -82,7 +84,7 @@ def train_fn(rank, world_size, args):
     if args.load_state:
         ckpt_path = os.path.join(args.state_path, "checkpoint_best.pth")
         ckpt = torch.load(ckpt_path, map_location=device)
-        model.load_state_dict(ckpt)
+        model.module.load_state_dict(ckpt)
 
     for epoch in range(args.num_epochs):
         model.train()
@@ -131,7 +133,7 @@ def train_fn(rank, world_size, args):
                 if rank == 0:
                     vbar.set_postfix(val_loss=test_loss / (vbar.n + 1))
 
-        # Tính trung bình metric val trên tất cả GPU
+        # Trung bình metric trên tất cả GPU
         for key in results:
             t = torch.tensor(results[key], device=device)
             dist.all_reduce(t, op=dist.ReduceOp.SUM)
@@ -142,17 +144,16 @@ def train_fn(rank, world_size, args):
         if rank == 0:
             print(f"Epoch {epoch}: train_loss={avg_loss:.5f}, val_loss={val_loss:.5f}, metrics={results}")
             os.makedirs(args.state_path, exist_ok=True)
-            # Lưu checkpoint tốt nhất
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 ckpt_path = os.path.join(args.state_path, f"checkpoint_best_{epoch}.pth")
                 torch.save(model.module.state_dict(), ckpt_path)
+
                 # Xóa checkpoint cũ
                 for f in glob.glob(os.path.join(args.state_path, "checkpoint_best_*.pth")):
                     if f != ckpt_path:
                         os.remove(f)
 
-            # Lưu lịch sử train
             history["train_loss"].append(avg_loss)
             history["val_loss"].append(val_loss)
             history["val_metrics"].append(results)
