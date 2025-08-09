@@ -57,7 +57,6 @@ def train_fn():
     torch.cuda.set_device(device)
     master_process = (rank == 0)
 
-    # parse args từ env hoặc add argparser nếu muốn (ví dụ hardcode tạm)
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch_size", type=int, default=8)
@@ -113,7 +112,7 @@ def train_fn():
     model.encoder = load_pretrained_encoder(model.encoder, args.weights_dir, args.backbone)
     model.decoder.apply(weights_init)
     model = model.to(device)
-    model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
 
     optimizer = torch.optim.SGD(model.parameters(), lr=3e-4, weight_decay=1e-4)
     criterion = DepthLoss()
@@ -144,7 +143,7 @@ def train_fn():
             depth = target.to(device, non_blocking=True)
 
             optimizer.zero_grad()
-            with torch.amp.autocast(device_type='cuda'):
+            with torch.amp.autocast(device='cuda'):
                 pred = model(img)
                 loss = criterion('l1', pred, depth, epoch)
 
@@ -169,7 +168,7 @@ def train_fn():
                 img = input.to(device, non_blocking=True)
                 depth = target.to(device, non_blocking=True)
 
-                with torch.amp.autocast(device_type='cuda'):
+                with torch.amp.autocast(device='cuda'):
                     pred = model(img)
                     l = criterion('l1', pred, depth)
 
