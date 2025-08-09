@@ -117,7 +117,7 @@ def train_fn():
     optimizer = torch.optim.SGD(model.parameters(), lr=3e-4, weight_decay=1e-4)
     criterion = DepthLoss()
 
-    scaler = torch.amp.GradScaler()
+    scaler = torch.cuda.amp.GradScaler()
 
     best_val_loss = 1e9
     history = {"train_loss": [], "val_loss": [], "val_metrics": []}
@@ -143,7 +143,7 @@ def train_fn():
             depth = target.to(device, non_blocking=True)
 
             optimizer.zero_grad()
-            with torch.amp.autocast(device='cuda'):
+            with torch.cuda.amp.autocast():
                 pred = model(img)
                 loss = criterion('l1', pred, depth, epoch)
 
@@ -168,7 +168,7 @@ def train_fn():
                 img = input.to(device, non_blocking=True)
                 depth = target.to(device, non_blocking=True)
 
-                with torch.amp.autocast(device='cuda'):
+                with torch.cuda.amp.autocast():
                     pred = model(img)
                     l = criterion('l1', pred, depth)
 
