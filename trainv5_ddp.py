@@ -96,7 +96,7 @@ def train_fn(rank, world_size, args):
             depth = target.to(device, non_blocking=True)
 
             optimizer.zero_grad()
-            with torch.amp.autocast():
+            with torch.amp.autocast(device_type='cuda'):
                 pred = model(img)
                 loss = criterion('l1', pred, depth, epoch)
 
@@ -121,7 +121,7 @@ def train_fn(rank, world_size, args):
                 img = input.to(device, non_blocking=True)
                 depth = target.to(device, non_blocking=True)
 
-                with torch.amp.autocast():
+                with torch.amp.autocast(device_type='cuda'):
                     pred = model(img)
                     l = criterion('l1', pred, depth)
 
