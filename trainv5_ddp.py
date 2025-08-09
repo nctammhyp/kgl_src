@@ -10,7 +10,7 @@ from torch.utils.data import DistributedSampler
 
 import utils
 from model_v4 import FastDepthV2, weights_init
-import dataloader_v5
+import dataloaderv5_ddp
 from load_pretrained import load_pretrained_encoder
 from metric_depth.util.loss import DepthLoss
 
@@ -44,19 +44,19 @@ def train_fn(rank, world_size, args):
     device = torch.device(f"cuda:{rank}")
 
     # Lấy đường dẫn dữ liệu
-    train_paths = dataloader_v5.get_image_label_pairs(os.path.join(args.data_root, "train"))
-    val_paths = dataloader_v5.get_image_label_pairs(os.path.join(args.data_root, "val"))
+    train_paths = dataloaderv5_ddp.get_image_label_pairs(os.path.join(args.data_root, "train"))
+    val_paths = dataloaderv5_ddp.get_image_label_pairs(os.path.join(args.data_root, "val"))
 
     # Tạo Dataset
-    train_dataset = dataloader_v5.DepthDataset(train_paths, mode="train", size=args.size)
-    val_dataset = dataloader_v5.DepthDataset(val_paths, mode="val", size=args.size)
+    train_dataset = dataloaderv5_ddp.DepthDataset(train_paths, mode="train", size=args.size)
+    val_dataset = dataloaderv5_ddp.DepthDataset(val_paths, mode="val", size=args.size)
 
     # Tạo DistributedSampler dựa trên dataset
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
 
     # Tạo DataLoader với sampler
-    train_loader, val_loader = dataloader_v5.create_data_loaders(
+    train_loader, val_loader = dataloaderv5_ddp.create_data_loaders(
         train_dataset,
         val_dataset,
         batch_size=args.batch_size,
