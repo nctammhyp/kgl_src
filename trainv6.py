@@ -83,7 +83,7 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
 
     optim = torch.optim.AdamW(
           model.parameters(),  # lấy toàn bộ parameter của model
-          lr=1e-3,
+          lr=3e-4,
           weight_decay=0.01
       )
 
