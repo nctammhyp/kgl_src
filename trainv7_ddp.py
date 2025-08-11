@@ -1,15 +1,20 @@
 import os
 import glob
 import json
+import time
+import datetime
 import math
-import torch
 import random
+import argparse
 import numpy as np
 from tqdm import tqdm
 
+import torch
+import torch.nn as nn
+import torch.optim as optim
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler
 
 import utils
 from model_v4 import FastDepthV2, weights_init
@@ -18,7 +23,6 @@ from load_pretrained import load_pretrained_encoder
 from metric_depth.util.loss import DepthLoss
 
 torch.backends.cudnn.benchmark = True
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 
 
 def eval_depth(pred, target):
@@ -45,60 +49,50 @@ def cleanup_ddp():
 
 
 def parse_size(s):
-    # Cho phép parse chuỗi "160,128" thành tuple (160, 128)
     if isinstance(s, tuple):
         return s
     return tuple(map(int, s.split(',')))
 
 
 def train_fn():
+    # ===== DDP setup =====
     rank, world_size = setup_ddp()
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
     master_process = (rank == 0)
 
-    import argparse
+    # ===== Parse args =====
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--weights_dir", type=str, default="/kaggle/working/kgl_src/Weights")
+    parser.add_argument("--weights_dir", type=str, default="./Weights")
     parser.add_argument("--backbone", type=str, default="mobilenetv2")
-    parser.add_argument("--data_root", type=str, default="/kaggle/input/hypdataset-v1-0/hypdataset_v1")
-    parser.add_argument("--state_path", type=str, default="/kaggle/working/ours_checkpoints")
+    parser.add_argument("--data_root", type=str, default="./dataset")
+    parser.add_argument("--state_path", type=str, default="./checkpoints")
     parser.add_argument("--load_state", action="store_true")
     parser.add_argument("--size", type=str, default="160,128")
     parser.add_argument("--num_epochs", type=int, default=50)
     args = parser.parse_args()
 
-    args.size = parse_size(args.size)  # chuyển từ "160,128" thành tuple (160,128)
+    args.size = parse_size(args.size)
 
     if master_process:
-        print(f"------ master -------")
-        print(f"Rank {rank} / World Size {world_size}")
-        print(f"Using device: {device}")
-        print(f"Batch size per process: {args.batch_size}")
-        print(f"Resize size: {args.size}")
-    else:
-        print(f"Rank {rank} / World Size {world_size}")
-        print(f"Using device: {device}")
-        print(f"Batch size per process: {args.batch_size}")
-        print(f"Resize size: {args.size}")
+        print(f"[DDP] Rank {rank}/{world_size} | Device {device}")
+        print(f"Batch size per GPU: {args.batch_size}")
+        print(f"Image resize: {args.size}")
 
-    # Load paths
+    # ===== Dataset & Dataloader =====
     train_paths = dataloaderv5_ddp.get_image_label_pairs(os.path.join(args.data_root, "train"))
     val_paths = dataloaderv5_ddp.get_image_label_pairs(os.path.join(args.data_root, "val"))
 
-    # Dataset
     train_dataset = dataloaderv5_ddp.DepthDataset(train_paths, mode="train", size=args.size)
     val_dataset = dataloaderv5_ddp.DepthDataset(val_paths, mode="val", size=args.size)
 
-    # Distributed sampler
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
 
-    # DataLoader
-    train_loader = torch.utils.data.DataLoader(
+    train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         sampler=train_sampler,
@@ -106,7 +100,7 @@ def train_fn():
         pin_memory=True,
         drop_last=True,
     )
-    val_loader = torch.utils.data.DataLoader(
+    val_loader = DataLoader(
         val_dataset,
         batch_size=1,
         sampler=val_sampler,
@@ -114,37 +108,42 @@ def train_fn():
         pin_memory=True,
     )
 
-    # Model setup
+    # ===== Model =====
     model = FastDepthV2()
     model.encoder = load_pretrained_encoder(model.encoder, args.weights_dir, args.backbone)
     model.decoder.apply(weights_init)
     model = model.to(device)
     model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=3e-4, weight_decay=1e-4)
+    # ===== Optimizer & Loss =====
+    # optimizer = optim.SGD(model.parameters(), lr=3e-4, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(
+          model.parameters(),  # lấy toàn bộ parameter của model
+          lr=3e-4,
+          weight_decay=0.01
+      )
     criterion = DepthLoss()
-
     scaler = torch.cuda.amp.GradScaler()
 
+    # ===== Load checkpoint =====
     best_val_loss = 1e9
     history = {"train_loss": [], "val_loss": [], "val_metrics": []}
 
-    if args.load_state:
+    if args.load_state and master_process:
         ckpt_path = os.path.join(args.state_path, "checkpoint_best.pth")
         if os.path.isfile(ckpt_path):
             ckpt = torch.load(ckpt_path, map_location=device)
             model.load_state_dict(ckpt)
-            if master_process:
-                print(f"Loaded checkpoint from {ckpt_path}")
-        else:
-            if master_process:
-                print(f"Checkpoint path {ckpt_path} does not exist")
+            print(f"Loaded checkpoint from {ckpt_path}")
 
+    # ===== Training loop =====
     for epoch in range(args.num_epochs):
         model.train()
         train_sampler.set_epoch(epoch)
+
         total_loss = 0.0
         pbar = tqdm(train_loader, desc=f"Rank {rank} Epoch {epoch} Train", disable=not master_process)
+
         for input, target in pbar:
             img = input.to(device, non_blocking=True)
             depth = target.to(device, non_blocking=True)
@@ -164,7 +163,7 @@ def train_fn():
 
         avg_loss = total_loss / len(train_loader)
 
-        # Validation
+        # ===== Validation =====
         model.eval()
         results = {'d1': 0.0, 'rmse': 0.0}
         test_loss = 0.0
@@ -184,35 +183,31 @@ def train_fn():
                 for k in results:
                     results[k] += cur_results[k]
 
-                if master_process:
-                    vbar.set_postfix(val_loss=test_loss / (vbar.n + 1))
-
-        # Trung bình metric trên tất cả GPU
+        # ===== Sync metrics across GPUs =====
         for key in results:
             t = torch.tensor(results[key], device=device)
             dist.all_reduce(t, op=dist.ReduceOp.SUM)
             results[key] = (t / world_size).item()
 
-        # Trung bình loss val (quan trọng để save model)
         t_loss = torch.tensor(test_loss, device=device)
         dist.all_reduce(t_loss, op=dist.ReduceOp.SUM)
         val_loss = (t_loss / world_size).item() / len(val_loader)
 
+        # ===== Save best checkpoint =====
         if master_process:
-            print(f"Epoch {epoch}: train_loss={avg_loss:.5f}, val_loss={val_loss:.5f}, metrics={results}")
+            print(f"[Epoch {epoch}] Train Loss={avg_loss:.5f} | Val Loss={val_loss:.5f} | Metrics={results}")
             os.makedirs(args.state_path, exist_ok=True)
 
-            # Save checkpoint chỉ khi val_loss tốt hơn
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 ckpt_path = os.path.join(args.state_path, f"checkpoint_best_{epoch}.pth")
                 torch.save(model.module.state_dict(), ckpt_path)
-                # Xóa checkpoint cũ khác
+                # Remove old checkpoints
                 for f in glob.glob(os.path.join(args.state_path, "checkpoint_best_*.pth")):
                     if f != ckpt_path:
                         os.remove(f)
 
-            # Lưu lịch sử train
+            # Save history
             history["train_loss"].append(avg_loss)
             history["val_loss"].append(val_loss)
             history["val_metrics"].append(results)
