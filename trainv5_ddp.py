@@ -1,226 +1,277 @@
+# train.py (DDP-aware, supports single-GPU run)
 import os
-import glob
-import json
 import math
 import torch
 import random
 import numpy as np
 from tqdm import tqdm
+import argparse
 
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler
 
-import utils
 from model_v4 import FastDepthV2, weights_init
-import dataloaderv5_ddp
-from load_pretrained import load_pretrained_encoder
 from metric_depth.util.loss import DepthLoss
+import dataloaderv5_ddp
+import utils
 
 torch.backends.cudnn.benchmark = True
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 
-
-def eval_depth(pred, target):
-    valid_mask = ((target > 0) + (pred > 0)) > 0
-    pred_output = pred[valid_mask]
-    target_masked = target[valid_mask]
-    abs_diff = (pred_output - target_masked).abs()
-    RMSE = torch.sqrt(torch.mean(abs_diff.pow(2)))
-    maxRatio = torch.max(pred_output / target_masked, target_masked / pred_output)
-    d1 = float((maxRatio < 1.25).float().mean())
-    return {'d1': d1, 'rmse': RMSE.item()}
-
-
+# -----------------------------
+# DDP setup & cleanup
+# -----------------------------
 def setup_ddp():
-    """Khởi tạo process group dựa trên biến môi trường."""
-    dist.init_process_group(backend='nccl')
+    dist.init_process_group(backend="nccl")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     return rank, world_size
 
-
 def cleanup_ddp():
     dist.destroy_process_group()
 
+# helper to reduce/aggregate a scalar across ranks (sum)
+def dist_reduce_scalar(x, device):
+    t = torch.tensor(x, device=device, dtype=torch.float32)
+    dist.all_reduce(t, op=dist.ReduceOp.SUM)
+    return t.item()
 
-def parse_size(s):
-    # Cho phép parse chuỗi "160,128" thành tuple (160, 128)
-    if isinstance(s, tuple):
-        return s
-    return tuple(map(int, s.split(',')))
+# -----------------------------
+# eval helper: aggregate metrics across ranks
+# -----------------------------
+def aggregate_metrics_across_ranks(sum_dict, count, device):
+    """
+    sum_dict: {'loss': float, 'd1': float, ...} sums computed on each rank for its subset
+    count: number of samples used by this rank (int)
+    returns: averaged metrics over total samples across all ranks
+    """
+    # pack into tensor: [sum_loss, sum_d1, count]
+    sum_loss = float(sum_dict.get("loss", 0.0))
+    sum_d1 = float(sum_dict.get("d1", 0.0))
+    packed = torch.tensor([sum_loss, sum_d1, float(count)], device=device)
+    dist.all_reduce(packed, op=dist.ReduceOp.SUM)
+    total_loss = packed[0].item()
+    total_d1 = packed[1].item()
+    total_count = int(packed[2].item())
+    avg_loss = total_loss / total_count if total_count > 0 else 0.0
+    avg_d1 = total_d1 / total_count if total_count > 0 else 0.0
+    return {"loss": avg_loss, "d1": avg_d1, "count": total_count}
 
+# -----------------------------
+# Training function
+# -----------------------------
+def train(args):
+    # Init DDP or single-GPU
+    if args.ddp:
+        rank, world_size = setup_ddp()
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        device = torch.device(f"cuda:{local_rank}")
+        torch.cuda.set_device(device)
+        master_process = (rank == 0)
+    else:
+        rank = 0
+        world_size = 1
+        local_rank = 0
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        master_process = True
 
-def train_fn():
-    rank, world_size = setup_ddp()
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    device = torch.device(f"cuda:{local_rank}")
-    torch.cuda.set_device(device)
-    master_process = (rank == 0)
-
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--weights_dir", type=str, default="/kaggle/working/kgl_src/Weights")
-    parser.add_argument("--backbone", type=str, default="mobilenetv2")
-    parser.add_argument("--data_root", type=str, default="/kaggle/input/hypdataset-v1-0/hypdataset_v1")
-    parser.add_argument("--state_path", type=str, default="/kaggle/working/ours_checkpoints")
-    parser.add_argument("--load_state", action="store_true")
-    parser.add_argument("--size", type=str, default="160,128")
-    parser.add_argument("--num_epochs", type=int, default=50)
-    args = parser.parse_args()
-
-    args.size = parse_size(args.size)  # chuyển từ "160,128" thành tuple (160,128)
+    # Decide batch_size per process
+    # If user specifies --batch_is_global, we divide by world_size to get per-GPU batch.
+    if args.batch_is_global and world_size > 1:
+        per_gpu_batch = max(1, args.batch_size // world_size)
+        if master_process:
+            print(f"[INFO] Interpreting --batch_size as GLOBAL. world_size={world_size}, using per-gpu batch={per_gpu_batch}")
+    else:
+        per_gpu_batch = args.batch_size
 
     if master_process:
-        print(f"------ master -------")
-        print(f"Rank {rank} / World Size {world_size}")
-        print(f"Using device: {device}")
-        print(f"Batch size per process: {args.batch_size}")
-        print(f"Resize size: {args.size}")
-    else:
-        print(f"Rank {rank} / World Size {world_size}")
-        print(f"Using device: {device}")
-        print(f"Batch size per process: {args.batch_size}")
-        print(f"Resize size: {args.size}")
+        print(f"[Rank {rank}] Running on {device}, world_size={world_size}, per_gpu_batch={per_gpu_batch}", flush=True)
 
-    # Load paths
-    train_paths = dataloaderv5_ddp.get_image_label_pairs(os.path.join(args.data_root, "train"))
-    val_paths = dataloaderv5_ddp.get_image_label_pairs(os.path.join(args.data_root, "val"))
+    # Seed for reproducibility
+    torch.manual_seed(42 + rank)
+    np.random.seed(42 + rank)
+    random.seed(42 + rank)
 
-    # Dataset
+    # Load dataset (you must implement these loader functions accordingly)
+    train_paths = dataloaderv5_ddp.get_image_label_pairs(os.path.join(args.train_dir, "train"))
+    val_paths = dataloaderv5_ddp.get_image_label_pairs(os.path.join(args.val_dir, "val"))
+
     train_dataset = dataloaderv5_ddp.DepthDataset(train_paths, mode="train", size=args.size)
     val_dataset = dataloaderv5_ddp.DepthDataset(val_paths, mode="val", size=args.size)
 
-    # Distributed sampler
-    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
-    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+    if args.ddp:
+        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True)
+        val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False, drop_last=False)
+    else:
+        train_sampler = None
+        val_sampler = None
 
-    # DataLoader
-    train_loader = torch.utils.data.DataLoader(
+    train_loader = DataLoader(
         train_dataset,
-        batch_size=args.batch_size,
+        batch_size=per_gpu_batch,
         sampler=train_sampler,
+        shuffle=(train_sampler is None),
         num_workers=args.num_workers,
         pin_memory=True,
-        drop_last=True,
+        drop_last=True
     )
-    val_loader = torch.utils.data.DataLoader(
+    # For validation keep batch_size small (e.g., 1) or per_gpu_batch
+    val_loader = DataLoader(
         val_dataset,
-        batch_size=1,
+        batch_size=args.val_batch_size if args.val_batch_size>0 else 1,
         sampler=val_sampler,
+        shuffle=False,
         num_workers=args.num_workers,
         pin_memory=True,
+        drop_last=False
     )
 
-    # Model setup
+    # Model
     model = FastDepthV2()
-    model.encoder = load_pretrained_encoder(model.encoder, args.weights_dir, args.backbone)
+    model.encoder = dataloaderv5_ddp.safe_load_encoder(model.encoder, args.weights_dir, args.backbone) if hasattr(dataloaderv5_ddp, "safe_load_encoder") else model.encoder
     model.decoder.apply(weights_init)
-    model = model.to(device)
-    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+    model.to(device)
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=3e-4, weight_decay=1e-4)
+    if args.ddp:
+        # remove find_unused_parameters=True unless necessary (overhead)
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank) 
+
     criterion = DepthLoss()
+    optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    scaler = torch.cuda.amp.GradScaler(enabled=args.use_amp)
 
-    scaler = torch.cuda.amp.GradScaler()
+    accum_steps = args.accum_steps
 
-    best_val_loss = 1e9
-    history = {"train_loss": [], "val_loss": [], "val_metrics": []}
+    # Quick check prints
+    if master_process:
+        print(f"[CONFIG] epochs={args.num_epochs}, accum_steps={accum_steps}, use_amp={args.use_amp}")
 
-    if args.load_state:
-        ckpt_path = os.path.join(args.state_path, "checkpoint_best.pth")
-        if os.path.isfile(ckpt_path):
-            ckpt = torch.load(ckpt_path, map_location=device)
-            model.load_state_dict(ckpt)
-            if master_process:
-                print(f"Loaded checkpoint from {ckpt_path}")
-        else:
-            if master_process:
-                print(f"Checkpoint path {ckpt_path} does not exist")
-
+    # -----------------------------
+    # Training loop
+    # -----------------------------
     for epoch in range(args.num_epochs):
         model.train()
-        train_sampler.set_epoch(epoch)
-        total_loss = 0.0
-        pbar = tqdm(train_loader, desc=f"Rank {rank} Epoch {epoch} Train", disable=not master_process)
-        for input, target in pbar:
-            img = input.to(device, non_blocking=True)
-            depth = target.to(device, non_blocking=True)
+        if args.ddp:
+            train_sampler.set_epoch(epoch)
 
-            optimizer.zero_grad()
-            with torch.cuda.amp.autocast():
+        total_loss = 0.0
+        batch_count = 0
+        optimizer.zero_grad(set_to_none=True)
+
+        pbar = tqdm(train_loader, desc=f"Rank {rank} Epoch {epoch} Train", disable=not master_process)
+        step = -1
+        for step, (img, depth) in enumerate(pbar):
+            img = img.to(device, non_blocking=True)
+            depth = depth.to(device, non_blocking=True)
+
+            with torch.cuda.amp.autocast(enabled=args.use_amp):
                 pred = model(img)
                 loss = criterion('l1', pred, depth, epoch)
 
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            # scale loss for accumulation
+            loss_to_backward = loss / accum_steps
+            scaler.scale(loss_to_backward).backward()
+
+            if (step + 1) % accum_steps == 0:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
 
             total_loss += loss.item()
+            batch_count += 1
             if master_process:
-                pbar.set_postfix(loss=total_loss / (pbar.n + 1))
+                # show raw per-batch loss (smoothed by total/batch_count)
+                pbar.set_postfix(loss=(total_loss / batch_count))
 
-        avg_loss = total_loss / len(train_loader)
+        # handle leftover batches (if any)
+        if (step + 1) % accum_steps != 0:
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
 
-        # Validation
+        # Compute avg train loss PER RANK, then reduce to get global average
+        local_avg_train_loss = (total_loss / batch_count) if batch_count>0 else 0.0
+        if args.ddp:
+            # reduce sum of averages weighted by counts: easier to send sum_loss and count
+            packed = torch.tensor([total_loss, float(batch_count)], device=device)
+            dist.all_reduce(packed, op=dist.ReduceOp.SUM)
+            global_sum_loss = packed[0].item()
+            global_count = int(packed[1].item())
+            global_avg_train_loss = global_sum_loss / global_count if global_count>0 else 0.0
+        else:
+            global_avg_train_loss = local_avg_train_loss
+
+        if master_process:
+            print(f"[Epoch {epoch}] train_loss={global_avg_train_loss:.5f} (local {local_avg_train_loss:.5f})")
+
+        # -----------------------------
+        # Validation: compute per-rank sums and counts, then aggregate
+        # -----------------------------
         model.eval()
-        results = {'d1': 0.0, 'rmse': 0.0}
-        test_loss = 0.0
+        local_val_sum = 0.0
+        local_val_count = 0
+        local_sum_d1 = 0.0  # example metric sum
 
         with torch.no_grad():
             vbar = tqdm(val_loader, desc=f"Rank {rank} Epoch {epoch} Val", disable=not master_process)
-            for input, target in vbar:
-                img = input.to(device, non_blocking=True)
-                depth = target.to(device, non_blocking=True)
-
-                with torch.cuda.amp.autocast():
+            for img, depth in vbar:
+                img = img.to(device, non_blocking=True)
+                depth = depth.to(device, non_blocking=True)
+                with torch.cuda.amp.autocast(enabled=args.use_amp):
                     pred = model(img)
-                    l = criterion('l1', pred, depth)
+                    l = criterion('l1', pred, depth, epoch)
+                local_val_sum += l.item()
+                # compute d1 for this batch (assume batch size 1 or small)
+                cur = utils.eval_depth_for_logging(pred, depth) if hasattr(utils, "eval_depth_for_logging") else None
+                if cur is not None:
+                    local_sum_d1 += cur.get("d1", 0.0)
+                local_val_count += 1
 
-                test_loss += l.item()
-                cur_results = eval_depth(pred, depth)
-                for k in results:
-                    results[k] += cur_results[k]
-
-                if master_process:
-                    vbar.set_postfix(val_loss=test_loss / (vbar.n + 1))
-
-        # Trung bình metric trên tất cả GPU
-        for key in results:
-            t = torch.tensor(results[key], device=device)
-            dist.all_reduce(t, op=dist.ReduceOp.SUM)
-            results[key] = (t / world_size).item()
-
-        # Trung bình loss val (quan trọng để save model)
-        t_loss = torch.tensor(test_loss, device=device)
-        dist.all_reduce(t_loss, op=dist.ReduceOp.SUM)
-        val_loss = (t_loss / world_size).item() / len(val_loader)
+        # Aggregate across ranks
+        if args.ddp:
+            packed = torch.tensor([local_val_sum, local_sum_d1, float(local_val_count)], device=device)
+            dist.all_reduce(packed, op=dist.ReduceOp.SUM)
+            total_val_sum = packed[0].item()
+            total_sum_d1 = packed[1].item()
+            total_val_count = int(packed[2].item())
+            global_val_loss = total_val_sum / total_val_count if total_val_count>0 else 0.0
+            global_d1 = total_sum_d1 / total_val_count if total_val_count>0 else 0.0
+        else:
+            global_val_loss = (local_val_sum / local_val_count) if local_val_count>0 else 0.0
+            global_d1 = (local_sum_d1 / local_val_count) if local_val_count>0 else 0.0
 
         if master_process:
-            print(f"Epoch {epoch}: train_loss={avg_loss:.5f}, val_loss={val_loss:.5f}, metrics={results}")
-            os.makedirs(args.state_path, exist_ok=True)
+            print(f"[Epoch {epoch}] val_loss={global_val_loss:.5f}, val_d1={global_d1:.5f} (total samples={total_val_count if args.ddp else local_val_count})")
 
-            # Save checkpoint chỉ khi val_loss tốt hơn
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                ckpt_path = os.path.join(args.state_path, f"checkpoint_best_{epoch}.pth")
-                torch.save(model.module.state_dict(), ckpt_path)
-                # Xóa checkpoint cũ khác
-                for f in glob.glob(os.path.join(args.state_path, "checkpoint_best_*.pth")):
-                    if f != ckpt_path:
-                        os.remove(f)
+    # Cleanup
+    if args.ddp:
+        cleanup_ddp()
 
-            # Lưu lịch sử train
-            history["train_loss"].append(avg_loss)
-            history["val_loss"].append(val_loss)
-            history["val_metrics"].append(results)
-            with open(os.path.join(args.state_path, "history.json"), "w") as f:
-                json.dump(history, f, indent=2)
-
-    cleanup_ddp()
-
-
+# -----------------------------
+# Main
+# -----------------------------
 if __name__ == "__main__":
-    train_fn()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--train_dir", type=str, required=True)
+    parser.add_argument("--val_dir", type=str, required=True)
+    parser.add_argument("--batch_size", type=int, default=8,
+                        help="If --batch_is_global is set, this is global batch; otherwise per-GPU batch.")
+    parser.add_argument("--batch_is_global", action="store_true",
+                        help="Interpret --batch_size as global batch and divide by world_size to get per-GPU batch.")
+    parser.add_argument("--val_batch_size", type=int, default=1)
+    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--num_epochs", type=int, default=50)
+    parser.add_argument("--accum_steps", type=int, default=1)
+    parser.add_argument("--ddp", action="store_true")
+    parser.add_argument("--use_amp", action="store_true")
+    parser.add_argument("--size", type=str, default="160,128")
+    parser.add_argument("--weights_dir", type=str, default="/kaggle/working/kgl_src/Weights")
+    parser.add_argument("--backbone", type=str, default="mobilenetv2")
+    args = parser.parse_args()
+
+    # parse size
+    if isinstance(args.size, str):
+        args.size = tuple(map(int, args.size.split(",")))
+
+    train(args)
