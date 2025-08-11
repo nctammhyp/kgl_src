@@ -69,7 +69,13 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
     model.encoder = load_pretrained_encoder(model.encoder,args.weights_dir,args.backbone)
     model.decoder.apply(weights_init)
 
-    optim = torch.optim.SGD(model.parameters(), lr = 3e-4 ,weight_decay=1e-4)
+    # optim = torch.optim.SGD(model.parameters(), lr = 3e-4 ,weight_decay=1e-4)
+    optim = torch.optim.AdamW(
+          model.parameters(),  # lấy toàn bộ parameter của model
+          lr=3e-4,
+          weight_decay=0.01
+      )
+
 
     print('Model created')
 
