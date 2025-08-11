@@ -84,7 +84,7 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
 
     # scheduler = transformers.get_cosine_schedule_with_warmup(optim, len(train_dataloader)*warmup_epochs, num_epochs*scheduler_rate*len(train_dataloader))
 
-    train_loader, val_loader = dataloader_v5.create_data_loaders("/kaggle/input/hypdataset-v1-0/hypdataset_v1")
+    train_loader, val_loader = dataloader_v5.create_data_loaders("/kaggle/input/hypdataset-v1-0/hypdataset_v1", batch_size=512)
  
 
     best_val_loss = 1e9
@@ -99,22 +99,30 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
         model = model.to("cuda")
 
 
+    accum_steps = 8  # số batch muốn cộng dồn trước khi update weights
+
     for epoch in range(0, num_epochs):
         model.train()
         total_loss = 0
 
-        for i , (input,target) in tqdm(enumerate(train_loader)):
+        optim.zero_grad()
+
+        for i, (input, target) in tqdm(enumerate(train_loader), total=len(train_loader)):
             img, depth = input.to(device), target.to(device)
 
-            optim.zero_grad()
             pred = model(img)
-            loss = criterion('l1',pred,depth,epoch)
+            loss = criterion('l1', pred, depth, epoch)
+            loss = loss / accum_steps   # chia loss để giữ scale ổn định
             loss.backward()
-            optim.step()
 
-            total_loss += loss.item()
+            if (i + 1) % accum_steps == 0 or (i + 1) == len(train_loader):
+                optim.step()
+                optim.zero_grad()
+
+            total_loss += loss.item() * accum_steps  # nhân lại để logging đúng
 
         avg_loss = total_loss / len(train_loader)
+
 
         # ===== Validation =====
         model.eval()
