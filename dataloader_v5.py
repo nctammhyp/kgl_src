@@ -95,7 +95,7 @@ def get_image_label_pairs(directory, img_ext=".png", label_ext=".png"):
     return pairs
 
 
-def subdataset_get_image_label_pairs(directory, img_ext=".png", label_ext=".png"):
+def subdataset_get_image_label_pairs(directory, img_ext=".png", label_ext=".png", phase = "train"):
     img_root = os.path.join(directory, "images")
     lbl_root = os.path.join(directory, "labels")
 
@@ -114,7 +114,7 @@ def subdataset_get_image_label_pairs(directory, img_ext=".png", label_ext=".png"
     }
 
     for scene_name in sorted(os.listdir(img_root)):
-        if scene_name not in allowed_scenes:
+        if phase == 'train' and scene_name not in allowed_scenes:
             continue  # Bỏ qua folder không nằm trong danh sách
 
         img_dir = os.path.join(img_root, scene_name)
@@ -146,8 +146,8 @@ def create_data_loaders(data_root, batch_size=64, size=(160, 128)):
     # val_paths   = get_image_label_pairs(os.path.join(data_root, "val"))
 
 
-    train_paths = subdataset_get_image_label_pairs(os.path.join(data_root, "train"))
-    val_paths   = subdataset_get_image_label_pairs(os.path.join(data_root, "val"))
+    train_paths = subdataset_get_image_label_pairs(os.path.join(data_root, "train"), phase = "train")
+    val_paths   = subdataset_get_image_label_pairs(os.path.join(data_root, "val"), phase = "val")
 
 
     random.shuffle(train_paths)
