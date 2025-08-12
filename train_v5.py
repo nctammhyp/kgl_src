@@ -84,7 +84,7 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
 
     # scheduler = transformers.get_cosine_schedule_with_warmup(optim, len(train_dataloader)*warmup_epochs, num_epochs*scheduler_rate*len(train_dataloader))
 
-    train_loader, val_loader = dataloader_v5.create_data_loaders("/kaggle/input/hypdataset-v1-0/hypdataset_v1", batch_size=256)
+    train_loader, val_loader = dataloader_v5.create_data_loaders("/kaggle/input/hypdataset-v1-0/hypdataset_v1", batch_size=512)
  
 
     best_val_loss = 1e9
@@ -100,6 +100,7 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
 
 
     accum_steps = 8  # số batch muốn cộng dồn trước khi update weights
+    scaler = torch.amp.GradScaler()
 
     for epoch in range(0, num_epochs):
         model.train()
@@ -107,12 +108,10 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
 
         optim.zero_grad()
 
-        scaler = torch.cuda.amp.GradScaler()
-
         for i, (input, target) in enumerate(train_loader):
             img, depth = input.to(device, non_blocking=True), target.to(device, non_blocking=True)
 
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast(device_type='cuda'):
                 pred = model(img)
                 loss = criterion('l1', pred, depth, epoch) / accum_steps
 
@@ -133,7 +132,7 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
         results = {'d1': 0, 'rmse': 0}
         test_loss = 0
 
-        with torch.no_grad():
+        with torch.no_grad(), torch.amp.autocast(device_type='cuda'):
             for i , (input,target) in tqdm(enumerate(val_loader)):
                 img, depth = input.to(device), target.to(device)
 
