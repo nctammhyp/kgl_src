@@ -91,7 +91,7 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
     history = {"train_loss": [], "val_loss": [], "val_metrics": []}
 
     if load_state:
-        checkpoint = torch.load("/kaggle/working/ours_checkpoints/checkpoint_best_358.pth", map_location=device)
+        checkpoint = torch.load("/kaggle/working/ours_checkpoints/checkpoint_best_30.pth", map_location=device)
         # model.load_state_dict(checkpoint["model"])
         # optim.load_state_dict(checkpoint["optim"])
 
@@ -107,16 +107,20 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
 
         optim.zero_grad()
 
-        for i, (input, target) in tqdm(enumerate(train_loader), total=len(train_loader)):
-            img, depth = input.to(device), target.to(device)
+        scaler = torch.cuda.amp.GradScaler()
 
-            pred = model(img)
-            loss = criterion('l1', pred, depth, epoch)
-            loss = loss / accum_steps   # chia loss để giữ scale ổn định
-            loss.backward()
+        for i, (input, target) in enumerate(train_loader):
+            img, depth = input.to(device, non_blocking=True), target.to(device, non_blocking=True)
+
+            with torch.cuda.amp.autocast():
+                pred = model(img)
+                loss = criterion('l1', pred, depth, epoch) / accum_steps
+
+            scaler.scale(loss).backward()
 
             if (i + 1) % accum_steps == 0 or (i + 1) == len(train_loader):
-                optim.step()
+                scaler.step(optim)
+                scaler.update()
                 optim.zero_grad()
 
             total_loss += loss.item() * accum_steps  # nhân lại để logging đúng
@@ -208,4 +212,4 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
 
 
 if __name__ == "__main__":
-    train_fn(device='cuda:0', load_state=False, state_path="/kaggle/working/ours_checkpoints")
+    train_fn(device='cuda:0', load_state=True, state_path="/kaggle/working/ours_checkpoints")

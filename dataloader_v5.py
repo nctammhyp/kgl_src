@@ -105,12 +105,14 @@ def subdataset_get_image_label_pairs(directory, img_ext=".png", label_ext=".png"
 
     # Danh sách folder được phép lấy
     allowed_scenes = {
-        "scene_1_3MP",
-        "scene_1_12MP",
+        # "scene_1_3MP",
+        # "scene_1_12MP",
         "scene_2_12MP",
         "scene_3_12MP",
         "scene_4_12MP",
-        "scene_5_12MP"
+        "scene_5_12MP",
+        "scene_6_12MP",
+        "scene_7_12MP"
     }
 
     for scene_name in sorted(os.listdir(img_root)):
