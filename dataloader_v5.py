@@ -97,8 +97,30 @@ def get_image_label_pairs(directory, img_ext=".png", label_ext=".png"):
 
 # ===================== Hàm tạo DataLoader =====================
 def create_data_loaders(data_root, batch_size=64, size=(160, 128)):
+    # train_paths = get_image_label_pairs(os.path.join(data_root, "train"))
+    # val_paths   = get_image_label_pairs(os.path.join(data_root, "val"))
+
+    # random.shuffle(train_paths)
+
+    # train_dataset = DepthDataset(train_paths, mode="train", size=size)
+    # val_dataset   = DepthDataset(val_paths, mode="val", size=size)
+
+    # train_loader = DataLoader(train_dataset, batch_size=batch_size,
+    #                           shuffle=True, num_workers=4,
+    #                           pin_memory=True, drop_last=True)
+
+    # val_loader = DataLoader(val_dataset, batch_size=1,
+    #                         shuffle=False, num_workers=4,
+    #                         pin_memory=True)
+
+    # return train_loader, val_loader
+
     train_paths = get_image_label_pairs(os.path.join(data_root, "train"))
     val_paths   = get_image_label_pairs(os.path.join(data_root, "val"))
+
+    # Lấy 1/5 phần ngẫu nhiên
+    train_paths = random.sample(train_paths, len(train_paths)//5)
+    val_paths = random.sample(val_paths, len(val_paths)//5)
 
     random.shuffle(train_paths)
 
@@ -106,14 +128,15 @@ def create_data_loaders(data_root, batch_size=64, size=(160, 128)):
     val_dataset   = DepthDataset(val_paths, mode="val", size=size)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size,
-                              shuffle=True, num_workers=4,
-                              pin_memory=True, drop_last=True)
+                            shuffle=True, num_workers=4,
+                            pin_memory=True, drop_last=True)
 
     val_loader = DataLoader(val_dataset, batch_size=1,
                             shuffle=False, num_workers=4,
                             pin_memory=True)
 
     return train_loader, val_loader
+
 
 
 # ===================== Example =====================
