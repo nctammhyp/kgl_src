@@ -84,7 +84,7 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
 
     # scheduler = transformers.get_cosine_schedule_with_warmup(optim, len(train_dataloader)*warmup_epochs, num_epochs*scheduler_rate*len(train_dataloader))
 
-    train_loader, val_loader = dataloader_v5.create_data_loaders("/kaggle/input/hypdataset-v1-0/hypdataset_v1", batch_size=128)
+    train_loader, val_loader = dataloader_v5.create_data_loaders("/kaggle/input/hypdataset-v1-0/hypdataset_v1", batch_size=256)
  
 
     best_val_loss = 1e9
@@ -108,7 +108,7 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
 
         optim.zero_grad()
 
-        for i, (input, target) in enumerate(train_loader):
+        for i, (input, target) in tqdm(enumerate(train_loader)):
             img, depth = input.to(device, non_blocking=True), target.to(device, non_blocking=True)
 
             with torch.amp.autocast(device_type='cuda'):
