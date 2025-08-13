@@ -91,7 +91,7 @@ def train_fn(device = "cpu", load_state = False, state_path = './'):
     history = {"train_loss": [], "val_loss": [], "val_metrics": []}
 
     if load_state:
-        checkpoint = torch.load("/kaggle/working/ours_checkpoints/checkpoint_best_30.pth", map_location=device)
+        checkpoint = torch.load("/kaggle/working/kgl_src/ours_checkpoints/checkpoint_best_30.pth", map_location=device)
         # model.load_state_dict(checkpoint["model"])
         # optim.load_state_dict(checkpoint["optim"])
 
